@@ -5,7 +5,7 @@ const client = new hubspot.Client({ accessToken: config.hubspotToken });
 module.exports = {
  async getContactsToCall() {
   try {
-    const LIST_ID = '103';
+    const LIST_ID = '133';
 
     const listResponse = await client.crm.lists.membershipsApi.getPage(
       LIST_ID,
@@ -24,9 +24,12 @@ module.exports = {
         'phone',
         'ai_outreach_status',
         'ai_next_attempt_time',
-        'ai_attempt_count'
+        'ai_attempt_count',
+        'hs_lead_status'
       ]
     });
+
+    
 
     const now = new Date();
 

@@ -41,6 +41,14 @@ cron.schedule("*/2 * * * *", async () => {
       const currentAttempt = parseInt(contact.properties.ai_attempt_count || 0);
       const nextAttemptNumber = currentAttempt + 1;
 
+      // Logic for lead_source mapping
+      const hsStatus = contact.properties.hs_lead_status;
+      let determinedLeadSource = "META_AD"; // Default value
+
+      if (hsStatus === "ATTEMPTED_TO_CONTACT" || hsStatus === "BAD_TIMING") {
+        determinedLeadSource = "HUBSPOT_WARM";
+      }
+
       // Basic Phone Sanitization (Retell needs E.164, e.g., +1...)
       let phone = contact.properties.phone.replace(/\s+/g, "");
       if (!phone.startsWith("+")) phone = `+${phone}`;
@@ -57,7 +65,7 @@ cron.schedule("*/2 * * * *", async () => {
           retell_llm_dynamic_variables: {
             FirstName: contact.properties.firstname || "there",
             hubspot_contact_id: contact.id,
-            lead_source:"META_AD"
+            lead_source: determinedLeadSource
           },
           metadata: {
             hubspot_contact_id: contact.id,
@@ -71,7 +79,7 @@ cron.schedule("*/2 * * * *", async () => {
           ai_attempt_count: nextAttemptNumber.toString(),
         });
 
-        console.log(`Call Initiated: ${call.call_id}`);
+        console.log(`Call Initiated: ${call.call_id} Lead Source: ${determinedLeadSource}`);
       } catch (callError) {
         console.error(
           `Retell API failed for contact ${contact.id}:`,
