@@ -1,0 +1,17 @@
+const ATTEMPT_DELAYS = [0, 1, 4, 24, 48]; // Hours to wait for attempt 1, 2, 3, 4, 5
+
+module.exports = {
+  calculateNextTime(currentAttempt) {
+    if (currentAttempt >= ATTEMPT_DELAYS.length) return null;
+    
+    const hours = ATTEMPT_DELAYS[currentAttempt];
+    const nextDate = new Date();
+    nextDate.setHours(nextDate.getHours() + hours);
+    return nextDate.toISOString();
+  },
+  
+  isHardStop(sentiment) {
+    const stops = ['Interested', 'Not Interested'];
+    return stops.includes(sentiment);
+  }
+};
