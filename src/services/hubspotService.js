@@ -22,6 +22,7 @@ module.exports = {
       properties: [
         'firstname',
         'phone',
+        'email',
         'ai_outreach_status',
         'ai_next_attempt_time',
         'ai_attempt_count',

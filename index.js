@@ -65,7 +65,8 @@ cron.schedule("*/2 * * * *", async () => {
           retell_llm_dynamic_variables: {
             FirstName: contact.properties.firstname || "there",
             hubspot_contact_id: contact.id,
-            lead_source: determinedLeadSource
+            lead_source: determinedLeadSource,
+            Email: contact.properties.email
           },
           metadata: {
             hubspot_contact_id: contact.id,
@@ -102,6 +103,64 @@ app.get("/health", (req, res) => {
     timestamp: new Date(),
   });
 });
+
+
+app.post('/retell-tools', async (req, res) => {
+  const { tool_calls, metadata } = req.body;
+  const contactId = metadata?.hubspot_contact_id;
+
+  try {
+    const results = [];
+
+    for (const toolCall of tool_calls) {
+      if (toolCall.function.name === 'book_meeting') {
+        const args = JSON.parse(toolCall.function.arguments);
+        
+        // 1. Execute Booking
+        const bookingResult = await calService.bookMeetingV2({
+          startTime: args.start_time,
+          eventTypeId: process.env.CAL_EVENT_TYPE_ID,
+          name: args.name,
+          email: args.email,
+          timeZone: args.timezone,
+          contactId: contactId
+        });
+
+        if (bookingResult.success) {
+          // 2. Success Path: Stop AI Retries in HubSpot
+          await hubspotService.updateContact(contactId, {
+            ai_outreach_status: 'Hard Stop',
+            ai_call_outcome: 'Interested',
+            ai_call_summary: `Meeting Booked for ${args.start_time}. ID: ${bookingResult.booking.id}`
+          });
+
+          results.push({
+            tool_call_id: toolCall.id,
+            output: "Success. The meeting is booked. Tell the user it's confirmed and they'll get an email."
+          });
+        } else {
+          // 3. Failure Path (Slot Taken/Busy)
+          results.push({
+            tool_call_id: toolCall.id,
+            output: `Failed: ${bookingResult.message}. Tell the user that specific time is taken and ask for another preference.`
+          });
+        }
+      }
+    }
+    
+    // Return first result or array depending on Retell version
+    return res.json(results[0]);
+
+  } catch (err) {
+    console.error("Middleware Error:", err);
+    // FAIL-SAFE: Always return a response so the call doesn't hang in silence
+    return res.json({
+      tool_call_id: tool_calls[0].id,
+      output: "I'm having trouble accessing the calendar right now. Please tell the user I'll have a human follow up to schedule."
+    });
+  }
+});
+
 
 app.post("/retell-webhook", async (req, res) => {
   try {
