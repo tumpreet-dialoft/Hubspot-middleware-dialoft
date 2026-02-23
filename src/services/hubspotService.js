@@ -75,11 +75,6 @@ module.exports = {
               },
               
               {
-                propertyName: "email",
-                operator: "EQ",
-                value: "tumpreet@dialoftai.com", 
-              },
-              {
                 propertyName: "ai_next_followup_time",
                 operator: "LT", // Less than Now
                 value: now,

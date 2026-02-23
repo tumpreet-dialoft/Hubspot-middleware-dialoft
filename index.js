@@ -1,32 +1,28 @@
 const express = require("express");
 const cron = require("node-cron");
 const Retell = require("retell-sdk");
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const config = require("./src/config");
 const hubspotService = require("./src/services/hubspotService");
 const retryLogic = require("./src/services/retryLogic");
-const smsService = require('./src/services/smsService');
-const sequenceLogic = require('./src/services/sequenceLogic');
-
+const smsService = require("./src/services/smsService");
+const sequenceLogic = require("./src/services/sequenceLogic");
+const zapierService = require("./src/services/zapierService");
 
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 min
-  max: 100 // 100 requests per minute per IP
+  max: 100, // 100 requests per minute per IP
 });
 
 const app = express();
-app.set('trust proxy', 1);
-
-
+app.set("trust proxy", 1);
 
 app.use(express.json());
 
 //Seucurity middleware.
 app.use(helmet());
 app.use(limiter);
-
-
 
 const retellClient = new Retell({ apiKey: config.retellApiKey });
 
@@ -68,7 +64,7 @@ cron.schedule("*/2 * * * *", async () => {
             FirstName: contact.properties.firstname || "there",
             hubspot_contact_id: contact.id,
             lead_source: determinedLeadSource,
-            Email: contact.properties.email
+            Email: contact.properties.email,
           },
           metadata: {
             hubspot_contact_id: contact.id,
@@ -82,7 +78,9 @@ cron.schedule("*/2 * * * *", async () => {
           ai_attempt_count: nextAttemptNumber.toString(),
         });
 
-        console.log(`Call Initiated: ${call.call_id} Lead Source: ${determinedLeadSource}`);
+        console.log(
+          `Call Initiated: ${call.call_id} Lead Source: ${determinedLeadSource}`,
+        );
       } catch (callError) {
         console.error(
           `Retell API failed for contact ${contact.id}:`,
@@ -90,16 +88,14 @@ cron.schedule("*/2 * * * *", async () => {
         );
       }
     }
-    
-
 
     // ===============================
     // 2️⃣ NEW FOLLOW-UP SEQUENCE ENGINE
     // ===============================
-    
+
     const followupContacts = await hubspotService.getContactsForFollowup();
     console.log(
-      `Found ${followupContacts.length} contacts in Follow-Up Sequence.`
+      `Found ${followupContacts.length} contacts in Follow-Up Sequence.`,
     );
 
     for (const contact of followupContacts) {
@@ -112,53 +108,57 @@ cron.schedule("*/2 * * * *", async () => {
         const { firstname, email, phone } = contact.properties;
         const bookingLink = `${process.env.CAL_BOOKING_URL}?name=${encodeURIComponent(firstname)}&email=${encodeURIComponent(email)}&utm_source=followup_step${stepNum}`;
 
-  
-       
-
         // --- EXECUTE STEP ---
         if (step.type === "SMS") {
           await smsService.sendSMS(
             contact.properties.phone,
-            step.body(name)
+            step.body(firstname, bookingLink),
           );
         } else if (step.type === "EMAIL") {
-           await emailService.sendFollowupEmail(email, firstname, stepNum, bookingLink);
+          await zapierService.triggerZapierEmail(
+            email,
+            firstname,
+            stepNum,
+            bookingLink,
+          );
         }
 
         // --- SCHEDULE NEXT STEP ---
-        const nextStepNum = stepNum + 1;
+        // --- SCHEDULE NEXT STEP ---
+        const MAX_STEP = 5;
+        const currentStepNum = Number(stepNum);
+
+        if (currentStepNum >= MAX_STEP) {
+          await hubspotService.updateContact(contact.id, {
+            enroll_in_sequance: "sequence_complete_no_booking",
+            ai_outreach_status: "Hard Stop",
+          });
+          return;
+        }
+
+        const nextStepNum = currentStepNum + 1;
         const nextStep = sequenceLogic.getStep(nextStepNum);
 
         if (nextStep) {
           await hubspotService.updateContact(contact.id, {
             ai_followup_step: nextStepNum.toString(),
-            ai_next_attempt_time: sequenceLogic.calculateNextStepTime(
-              nextStep.delay - step.delay
+            ai_next_followup_time: sequenceLogic.calculateNextStepTime(
+              nextStep.delay,
             ),
-          });
-        } else {
-          await hubspotService.updateContact(contact.id, {
-            enroll_in_sequance: "sequence_complete_no_booking",
-      
           });
         }
       } catch (followError) {
         console.error(
           `Follow-up processing failed for contact ${contact.id}:`,
-          followError.message
+          followError.message,
         );
       }
     }
-
-    
   } catch (error) {
     console.error("General Poller Error:", error.message);
   }
   console.log("--- Poller Cycle End ---");
-  
 });
-
-
 
 app.get("/health", (req, res) => {
   res.status(200).json({
@@ -168,9 +168,35 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.post("/cal-webhook", async (req, res) => {
+  try {
+    const { payload } = req.body;
 
+    if (!payload?.attendees?.length) {
+      console.log("No attendees found");
+      return res.sendStatus(200);
+    }
 
+    const email = payload.attendees[0].email;
 
+    const contact = await hubspotService.findContactByEmail(email);
+
+    if (contact) {
+      await hubspotService.updateContact(contact.id, {
+        ai_outreach_status: "Hard Stop",
+        ai_call_outcome: "Interested",
+      });
+
+      console.log(`Booking confirmed for ${email}. Stopped AI outreach.`);
+    } else {
+      console.log(`No HubSpot contact found for ${email}`);
+    }
+  } catch (err) {
+    console.error("Webhook processing error:", err.message);
+  }
+
+  res.sendStatus(200);
+});
 
 app.post("/retell-webhook", async (req, res) => {
   try {
@@ -204,11 +230,8 @@ app.post("/retell-webhook", async (req, res) => {
 
     const recordingUrl = call?.recording_url || "";
 
-    const ai_call_booking_time = call?.call_analysis?.custom_analysis_data?.ai_call_booking_time || null;
-
-    
-
-    
+    const ai_call_booking_time =
+      call?.call_analysis?.custom_analysis_data?.ai_call_booking_time || null;
 
     // DO NOT convert — already correct German ISO format
     const bookingTime = ai_call_booking_time || null;
@@ -219,8 +242,6 @@ app.post("/retell-webhook", async (req, res) => {
 
     let nextStatus = "Pending";
     let nextTime = retryLogic.calculateNextTime(attempt);
-    
-    
 
     // Hard stop or retry exhaustion logic
     if (retryLogic.isHardStop(sentiment) || !nextTime) {
@@ -237,8 +258,7 @@ app.post("/retell-webhook", async (req, res) => {
         ai_call_outcome: sentiment,
         ai_call_summary: summary,
         ai_recording_url: recordingUrl,
-        ai_call_booking_time: bookingTime, 
-
+        ai_call_booking_time: bookingTime,
       });
     } catch (hubspotError) {
       console.error(
