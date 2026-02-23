@@ -73,6 +73,7 @@ module.exports = {
                 operator: "EQ",
                 value: "Pending",
               },
+              
               {
                 propertyName: "email",
                 operator: "EQ",
