@@ -1,30 +1,28 @@
 const express = require("express");
 const cron = require("node-cron");
 const Retell = require("retell-sdk");
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const config = require("./src/config");
 const hubspotService = require("./src/services/hubspotService");
 const retryLogic = require("./src/services/retryLogic");
-
+const smsService = require("./src/services/smsService");
+const sequenceLogic = require("./src/services/sequenceLogic");
+const zapierService = require("./src/services/zapierService");
 
 const limiter = rateLimit({
   windowMs: 60 * 1000, // 1 min
-  max: 100 // 100 requests per minute per IP
+  max: 100, // 100 requests per minute per IP
 });
 
 const app = express();
-app.set('trust proxy', 1);
-
-
+app.set("trust proxy", 1);
 
 app.use(express.json());
 
 //Seucurity middleware.
 app.use(helmet());
 app.use(limiter);
-
-
 
 const retellClient = new Retell({ apiKey: config.retellApiKey });
 
@@ -66,7 +64,7 @@ cron.schedule("*/2 * * * *", async () => {
             FirstName: contact.properties.firstname || "there",
             hubspot_contact_id: contact.id,
             lead_source: determinedLeadSource,
-            Email: contact.properties.email
+            Email: contact.properties.email,
           },
           metadata: {
             hubspot_contact_id: contact.id,
@@ -80,11 +78,79 @@ cron.schedule("*/2 * * * *", async () => {
           ai_attempt_count: nextAttemptNumber.toString(),
         });
 
-        console.log(`Call Initiated: ${call.call_id} Lead Source: ${determinedLeadSource}`);
+        console.log(
+          `Call Initiated: ${call.call_id} Lead Source: ${determinedLeadSource}`,
+        );
       } catch (callError) {
         console.error(
           `Retell API failed for contact ${contact.id}:`,
           callError.message,
+        );
+      }
+    }
+
+    // ===============================
+    // 2️⃣ NEW FOLLOW-UP SEQUENCE ENGINE
+    // ===============================
+
+    const followupContacts = await hubspotService.getContactsForFollowup();
+    console.log(
+      `Found ${followupContacts.length} contacts in Follow-Up Sequence.`,
+    );
+
+    for (const contact of followupContacts) {
+      try {
+        const stepNum = parseInt(contact.properties.ai_followup_step || 1);
+        const step = sequenceLogic.getStep(stepNum);
+
+        if (!step) continue;
+
+        const { firstname, email, phone } = contact.properties;
+        const bookingLink = `${process.env.CAL_BOOKING_URL}?name=${encodeURIComponent(firstname)}&email=${encodeURIComponent(email)}&utm_source=followup_step${stepNum}`;
+
+        // --- EXECUTE STEP ---
+        if (step.type === "SMS") {
+          await smsService.sendSMS(
+            contact.properties.phone,
+            step.body(firstname, bookingLink),
+          );
+        } else if (step.type === "EMAIL") {
+          await zapierService.triggerZapierEmail(
+            email,
+            firstname,
+            stepNum,
+            bookingLink,
+          );
+        }
+
+        // --- SCHEDULE NEXT STEP ---
+        // --- SCHEDULE NEXT STEP ---
+        const MAX_STEP = 5;
+        const currentStepNum = Number(stepNum);
+
+        if (currentStepNum >= MAX_STEP) {
+          await hubspotService.updateContact(contact.id, {
+            enroll_in_sequance: "sequence_complete_no_booking",
+            ai_outreach_status: "Hard Stop",
+          });
+          return;
+        }
+
+        const nextStepNum = currentStepNum + 1;
+        const nextStep = sequenceLogic.getStep(nextStepNum);
+
+        if (nextStep) {
+          await hubspotService.updateContact(contact.id, {
+            ai_followup_step: nextStepNum.toString(),
+            ai_next_followup_time: sequenceLogic.calculateNextStepTime(
+              nextStep.delay,
+            ),
+          });
+        }
+      } catch (followError) {
+        console.error(
+          `Follow-up processing failed for contact ${contact.id}:`,
+          followError.message,
         );
       }
     }
@@ -94,8 +160,6 @@ cron.schedule("*/2 * * * *", async () => {
   console.log("--- Poller Cycle End ---");
 });
 
-// --- RETELL WEBHOOK ---
-
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",
@@ -104,63 +168,35 @@ app.get("/health", (req, res) => {
   });
 });
 
-
-app.post('/retell-tools', async (req, res) => {
-  const { tool_calls, metadata } = req.body;
-  const contactId = metadata?.hubspot_contact_id;
-
+app.post("/cal-webhook", async (req, res) => {
   try {
-    const results = [];
+    const { payload } = req.body;
 
-    for (const toolCall of tool_calls) {
-      if (toolCall.function.name === 'book_meeting') {
-        const args = JSON.parse(toolCall.function.arguments);
-        
-        // 1. Execute Booking
-        const bookingResult = await calService.bookMeetingV2({
-          startTime: args.start_time,
-          eventTypeId: process.env.CAL_EVENT_TYPE_ID,
-          name: args.name,
-          email: args.email,
-          timeZone: args.timezone,
-          contactId: contactId
-        });
-
-        if (bookingResult.success) {
-          // 2. Success Path: Stop AI Retries in HubSpot
-          await hubspotService.updateContact(contactId, {
-            ai_outreach_status: 'Hard Stop',
-            ai_call_outcome: 'Interested',
-            ai_call_summary: `Meeting Booked for ${args.start_time}. ID: ${bookingResult.booking.id}`
-          });
-
-          results.push({
-            tool_call_id: toolCall.id,
-            output: "Success. The meeting is booked. Tell the user it's confirmed and they'll get an email."
-          });
-        } else {
-          // 3. Failure Path (Slot Taken/Busy)
-          results.push({
-            tool_call_id: toolCall.id,
-            output: `Failed: ${bookingResult.message}. Tell the user that specific time is taken and ask for another preference.`
-          });
-        }
-      }
+    if (!payload?.attendees?.length) {
+      console.log("No attendees found");
+      return res.sendStatus(200);
     }
-    
-    // Return first result or array depending on Retell version
-    return res.json(results[0]);
 
+    const email = payload.attendees[0].email;
+
+    const contact = await hubspotService.findContactByEmail(email);
+
+    if (contact) {
+      await hubspotService.updateContact(contact.id, {
+        ai_outreach_status: "Hard Stop",
+        ai_call_outcome: "Interested",
+      });
+
+      console.log(`Booking confirmed for ${email}. Stopped AI outreach.`);
+    } else {
+      console.log(`No HubSpot contact found for ${email}`);
+    }
   } catch (err) {
-    console.error("Middleware Error:", err);
-    // FAIL-SAFE: Always return a response so the call doesn't hang in silence
-    return res.json({
-      tool_call_id: tool_calls[0].id,
-      output: "I'm having trouble accessing the calendar right now. Please tell the user I'll have a human follow up to schedule."
-    });
+    console.error("Webhook processing error:", err.message);
   }
-});
 
+  res.sendStatus(200);
+});
 
 app.post("/retell-webhook", async (req, res) => {
   try {
@@ -194,11 +230,8 @@ app.post("/retell-webhook", async (req, res) => {
 
     const recordingUrl = call?.recording_url || "";
 
-    const ai_call_booking_time = call?.call_analysis?.custom_analysis_data?.ai_call_booking_time || null;
-
-    
-
-    
+    const ai_call_booking_time =
+      call?.call_analysis?.custom_analysis_data?.ai_call_booking_time || null;
 
     // DO NOT convert — already correct German ISO format
     const bookingTime = ai_call_booking_time || null;
@@ -209,8 +242,6 @@ app.post("/retell-webhook", async (req, res) => {
 
     let nextStatus = "Pending";
     let nextTime = retryLogic.calculateNextTime(attempt);
-    
-    
 
     // Hard stop or retry exhaustion logic
     if (retryLogic.isHardStop(sentiment) || !nextTime) {
@@ -227,8 +258,7 @@ app.post("/retell-webhook", async (req, res) => {
         ai_call_outcome: sentiment,
         ai_call_summary: summary,
         ai_recording_url: recordingUrl,
-        ai_call_booking_time: bookingTime, 
-
+        ai_call_booking_time: bookingTime,
       });
     } catch (hubspotError) {
       console.error(

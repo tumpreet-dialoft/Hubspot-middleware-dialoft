@@ -1,4 +1,4 @@
-const ATTEMPT_DELAYS = [0, 1, 4, 24, 48]; // Hours to wait for attempt 1, 2, 3, 4, 5
+const ATTEMPT_DELAYS = [0, 1, 4, 24, 48, 66, 70]; // Hours to wait for attempt 1, 2, 3, 4, 5
 
 module.exports = {
   calculateNextTime(currentAttempt) {
