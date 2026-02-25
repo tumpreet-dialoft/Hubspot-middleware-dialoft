@@ -8,6 +8,4 @@ module.exports = {
   port: process.env.PORT || 3000,
   twilioSid: process.env.TWILIO_SID,
   twilioAuthToken :process.env.TWILIO_AUTH_TOKEN
-
-
 };
