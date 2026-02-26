@@ -1,5 +1,5 @@
 const TIMELINE = [
-  { step: 1, delay: 0, type: 'SMS', body: (name, link) => `Hi ${name}, sorry we missed you! I'd love to chat. You can book a time here: ${link}` },
+  { step: 1, delay: 0, type: 'SMS', body: (name, link) => `Hi ${name}, this is Mara from FounderScale. I just tried calling about your request for the Free Meta Ads Microtesting Trial. Sorry we missed you — book a quick time here: ${link}` },
   { step: 2, delay: 0.5, type: 'EMAIL', internal_name: 'followup_email_1' }, // 30 mins
   { step: 3, delay: 24, type: 'SMS', body: (name, link) => `Hey ${name}, just a quick reminder to grab a slot for our session if you're still interested! You can pick a time here: ${link}`},
   { step: 4, delay: 48, type: 'EMAIL', internal_name: 'followup_email_2' },
